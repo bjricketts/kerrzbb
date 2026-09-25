@@ -62,7 +62,11 @@ def main():
     parser.add_argument("--out", default=os.path.join(os.path.dirname(__file__),
                                                       "kerrbb_reference.json"))
     parser.add_argument("--spins", type=float, nargs="+",
-                        default=[-0.9, 0.5, 0.9, 0.99, 0.998])
+                        # kerrbb table nodes (float32 values from kerrbb.fits GRIDVALS);
+                        # off-node spins are linearly interpolated by XSPEC, which
+                        # dominates any comparison (up to ~8% in the Wien tail).
+                        default=[-0.9, 0.5, 0.9042770266532898, 0.9902870059013367,
+                                 0.9982540011405945])
     parser.add_argument("--incl", type=float, nargs="+", default=[30.0, 60.0, 85.0],
                         help="inclinations in degrees")
     parser.add_argument("--eta", type=float, nargs="+", default=[0.0, 1.0])

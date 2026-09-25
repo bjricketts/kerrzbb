@@ -5,3 +5,4 @@ __pycache__/
 validation/kerrbb_comparison*
 validation/kerrbb_table.json
 validation/kerrbb_reference.json
+validation/derivative_scan.*
