@@ -36,11 +36,23 @@ typedef struct {
     size_t n_theta;           /* image-plane angles */
     size_t n_rho;             /* image-plane radii between r_in and r_break contours */
     size_t n_outer;           /* radii in the weak-field region */
-    size_t n_energy;          /* Gauss-Legendre nodes per energy bin */
+    size_t n_energy;          /* Gauss-Legendre nodes per energy bin (<= 32) */
     double r_break;           /* start of the weak-field region, r_g */
     double r_out;             /* outer disc radius, r_g */
     double observer_distance; /* launch radius of the rays, r_g */
+    size_t n_radii;           /* returning radiation: radial nodes */
+    size_t n_psi;             /* returning radiation: polar nodes per azimuth */
+    size_t n_chi;             /* returning radiation: azimuths */
+    double r_max;             /* returning radiation: outermost node, r_g */
+    size_t n_threads;         /* threads per evaluation (0: one per CPU) */
+    int energy_grid;          /* use an interpolated ln E grid for many narrow bins */
+    double grid_step;         /* its step in ln E */
 } kzbb_Options;
+
+/* A model with a cache of the ray tracing: repeated calls that change only
+ * mass, mdot, distance, fcol, eta or norm skip the ray tracing. A model is not
+ * thread-safe; use one per thread. */
+typedef struct kzbb_Model kzbb_Model;
 
 /* Bits of the free-parameter mask, also the Jacobian column order. */
 enum {
@@ -90,6 +102,16 @@ int kzbb_free_count(uint32_t free_mask);
 int kzbb_evaluate(const kzbb_Params *params, uint32_t free_mask,
                   const double *edges, size_t n_bins, double *flux,
                   double *jacobian, const kzbb_Options *options);
+
+/* Create a model (NULL options: defaults). Returns NULL on invalid options
+ * or allocation failure. */
+kzbb_Model *kzbb_model_create(const kzbb_Options *options);
+void kzbb_model_destroy(kzbb_Model *model);
+
+/* As kzbb_evaluate, with the model's options and cache. */
+int kzbb_model_evaluate(kzbb_Model *model, const kzbb_Params *params,
+                        uint32_t free_mask, const double *edges, size_t n_bins,
+                        double *flux, double *jacobian);
 
 const char *kzbb_status_string(int code);
 const char *kzbb_version(void);

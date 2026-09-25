@@ -44,6 +44,13 @@ class _Options(ctypes.Structure):
         ("r_break", ctypes.c_double),
         ("r_out", ctypes.c_double),
         ("observer_distance", ctypes.c_double),
+        ("n_radii", ctypes.c_size_t),
+        ("n_psi", ctypes.c_size_t),
+        ("n_chi", ctypes.c_size_t),
+        ("r_max", ctypes.c_double),
+        ("n_threads", ctypes.c_size_t),
+        ("energy_grid", ctypes.c_int),
+        ("grid_step", ctypes.c_double),
     ]
 
 
@@ -72,10 +79,13 @@ def _find_library(explicit=None):
 
 
 class KerrzBB:
-    """Callable kerrzbb model.
+    """Callable kerrzbb model with a cache of the ray tracing.
 
-    Keyword options (n_theta, n_rho, n_outer, n_energy, r_break, r_out,
-    observer_distance) override the numerical defaults.
+    Keyword options override the numerical defaults: n_theta, n_rho, n_outer,
+    n_energy, r_break, r_out, observer_distance (image), n_radii, n_psi, n_chi,
+    r_max (returning radiation), n_threads (0: one per CPU), energy_grid,
+    grid_step. Calls that change only mass, mdot, distance, fcol, eta or norm
+    reuse the cached ray tracing. An instance is not thread-safe.
     """
 
     def __init__(self, library=None, **options):
@@ -91,15 +101,34 @@ class KerrzBB:
             ctypes.POINTER(_Options),
         ]
         lib.kzbb_evaluate.restype = ctypes.c_int
+        lib.kzbb_model_create.argtypes = [ctypes.POINTER(_Options)]
+        lib.kzbb_model_create.restype = ctypes.c_void_p
+        lib.kzbb_model_destroy.argtypes = [ctypes.c_void_p]
+        lib.kzbb_model_destroy.restype = None
+        lib.kzbb_model_evaluate.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(_Params), ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_double), ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        ]
+        lib.kzbb_model_evaluate.restype = ctypes.c_int
         lib.kzbb_status_string.argtypes = [ctypes.c_int]
         lib.kzbb_status_string.restype = ctypes.c_char_p
         lib.kzbb_version.restype = ctypes.c_char_p
 
         self.options = lib.kzbb_default_options()
         for key, value in options.items():
-            if not hasattr(self.options, key):
+            if key not in dict(_Options._fields_):
                 raise TypeError(f"unknown option {key!r}")
-            setattr(self.options, key, value)
+            setattr(self.options, key, int(value) if key == "energy_grid" else value)
+        self._model = lib.kzbb_model_create(ctypes.byref(self.options))
+        if not self._model:
+            raise ValueError("invalid options")
+
+    def __del__(self):
+        model = getattr(self, "_model", None)
+        if model:
+            self._lib.kzbb_model_destroy(model)
+            self._model = None
 
     @property
     def version(self):
@@ -136,10 +165,9 @@ class KerrzBB:
         flux = np.empty(n_bins)
         jac = np.empty((n_bins, n_free)) if n_free else None
         dp = ctypes.POINTER(ctypes.c_double)
-        status = self._lib.kzbb_evaluate(
-            ctypes.byref(params), mask, edges.ctypes.data_as(dp), n_bins,
+        status = self._lib.kzbb_model_evaluate(
+            self._model, ctypes.byref(params), mask, edges.ctypes.data_as(dp), n_bins,
             flux.ctypes.data_as(dp), jac.ctypes.data_as(dp) if n_free else None,
-            ctypes.byref(self.options),
         )
         if status != 0:
             raise KerrzBBError(status, self._lib.kzbb_status_string(status).decode())

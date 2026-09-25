@@ -6,8 +6,8 @@ disc image is ray traced on the fly with [kerrz](https://cosroe.com/kerrz)
 instead of being read from a precomputed table, and the spectrum comes with
 forward-mode derivatives with respect to every parameter.
 
-Status and design notes are in `PLAN.md`. Self-irradiation of the disc by
-returning radiation (kerrbb's `rflag`) is included.
+Self-irradiation of the disc by returning radiation (kerrbb's `rflag`) is 
+included.
 
 ## Building
 
@@ -18,7 +18,26 @@ Requires Zig 0.15.2 and a kerrz checkout next to this repository (`../kerrz`).
 
 `ReleaseSafe` is recommended for the library. kerrz contains assertions that
 can fail for extreme rays: in `ReleaseSafe` they stop the process with a
-message, while in `ReleaseFast` they are undefined behaviour.
+message, while in `ReleaseFast` they are undefined behaviour. `ReleaseSafe`
+costs about 10-20% in speed.
+
+## Performance
+
+Release build, one thread, 200 or 3000 bins (`python validation/benchmark.py`):
+
+| | value | value + d/d(a, i, mdot) |
+|---|---|---|
+| new spin or inclination | 22 ms | 38 ms |
+| new spin, with rflag | 80 ms | 125 ms |
+| cached (only M, mdot, D, fcol, eta or norm changed) | 17 ms | 25 ms |
+
+The ray tracing is cached per model instance (`kerrbb.Model`,
+`kzbb_model_create`, the Python `KerrzBB` object, `KerrzBBCache` in Julia), so
+fits that vary only the mass, accretion rate, distance, fcol, eta or norm skip
+it. Many narrow bins are handled on an interpolated ln E grid, so the cost does
+not grow with the number of bins. `n_threads` (0 for one per CPU) parallelises
+the ray tracing, the returning-radiation kernel and the energy sums; four
+threads give about 3x. Results are identical for any thread count.
 
 ## Parameters
 
@@ -51,7 +70,8 @@ above; the inclination derivative is per degree.
   SpectralFitting.jl additive model. ForwardDiff derivatives are assembled from
   kerrzbb's Jacobian.
 - **XSPEC**: `xspec/` holds a local model with the same parameters as kerrbb.
-  The library is loaded at run time from `KERRZBB_LIBRARY`:
+  The library is loaded at run time from `KERRZBB_LIBRARY`, and
+  `KERRZBB_THREADS` sets the threads per evaluation:
 
       export KERRZBB_LIBRARY=$PWD/zig-out/lib/libkerrzbb.dylib
       cd xspec && initpackage kerrzbb lmodel_kerrzbb.dat . && hmake
@@ -67,4 +87,4 @@ above; the inclination derivative is per degree.
     python validation/plot_comparison.py out.json
 
 For zero torque, kerrzbb agrees with kerrbb's table to about 0.1% without
-self-irradiation and to about 1% with it for a <= 0.9 (see `PLAN.md`).
+self-irradiation and to about 1% with it for a <= 0.9.

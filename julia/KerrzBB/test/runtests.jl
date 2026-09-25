@@ -18,6 +18,8 @@ const BASE = (eta = 0.1, a = 0.8, incl = 50.0, mass = 8.0, mdot = 1.2, distance 
           kerrzbb_flux(EDGES; BASE..., a = BASE.a - h, options = FAST)) ./ (2h)
     @test jac[:, 1] ≈ fd rtol = 1e-4
     @test_throws KerrzBB.KerrzBBError kerrzbb_flux(EDGES; BASE..., a = 0.0, options = FAST)
+    cache = KerrzBBCache(FAST)
+    @test kerrzbb_flux(EDGES; BASE..., cache = cache) == flux
 end
 
 @testset "SpectralFitting model and ForwardDiff" begin

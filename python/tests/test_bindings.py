@@ -43,6 +43,21 @@ def test_column_order_follows_parameters():
     np.testing.assert_allclose(part[:, 1], full[:, PARAMETERS.index("fcol")], rtol=1e-12)
 
 
+def test_cache_and_threads():
+    serial = KerrzBB(**FAST)
+    threaded = KerrzBB(**FAST, n_threads=3)
+    for mdot in (1.0, 1.5):
+        a = serial(EDGES, **dict(BASE, mdot=mdot), returning_radiation=True)
+        b = threaded(EDGES, **dict(BASE, mdot=mdot), returning_radiation=True)
+        np.testing.assert_array_equal(a, b)
+    try:
+        KerrzBB(n_energy=0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for invalid options")
+
+
 def test_errors():
     model = KerrzBB(**FAST)
     try:

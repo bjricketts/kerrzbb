@@ -7,6 +7,7 @@ pub const kerrz = @import("kerrz");
 pub const constants = @import("constants.zig");
 pub const disc = @import("disc.zig");
 pub const quadrature = @import("quadrature.zig");
+pub const parallel = @import("parallel.zig");
 pub const image = @import("image.zig");
 pub const spectrum = @import("spectrum.zig");
 pub const returning = @import("returning.zig");

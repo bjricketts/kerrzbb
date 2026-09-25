@@ -30,6 +30,13 @@ pub const Options = extern struct {
     r_break: f64,
     r_out: f64,
     observer_distance: f64,
+    n_radii: usize,
+    n_psi: usize,
+    n_chi: usize,
+    r_max: f64,
+    n_threads: usize,
+    energy_grid: c_int,
+    grid_step: f64,
 };
 
 pub const Status = enum(c_int) {
@@ -71,8 +78,24 @@ fn toOptions(o: Options) kerrbb.Options {
             .r_out = o.r_out,
             .observer_distance = o.observer_distance,
         },
+        .returning = .{
+            .n_radii = o.n_radii,
+            .n_psi = o.n_psi,
+            .n_chi = o.n_chi,
+            .r_max = o.r_max,
+        },
         .n_energy = o.n_energy,
+        .n_threads = o.n_threads,
+        .energy_grid = o.energy_grid != 0,
+        .grid_step = o.grid_step,
     };
+}
+
+fn validOptions(o: Options) bool {
+    return o.n_theta >= 4 and o.n_rho >= 2 and o.n_outer >= 2 and o.n_energy >= 1 and
+        o.n_energy <= 32 and o.n_radii >= 3 and o.n_psi >= 2 and o.n_chi >= 1 and
+        o.r_break > 0 and o.r_out > o.r_break and o.observer_distance > o.r_out and
+        o.r_max > 0 and o.grid_step > 0;
 }
 
 export fn kzbb_default_options() Options {
@@ -85,11 +108,66 @@ export fn kzbb_default_options() Options {
         .r_break = d.image.r_break,
         .r_out = d.image.r_out,
         .observer_distance = d.image.observer_distance,
+        .n_radii = d.returning.n_radii,
+        .n_psi = d.returning.n_psi,
+        .n_chi = d.returning.n_chi,
+        .r_max = d.returning.r_max,
+        .n_threads = d.n_threads,
+        .energy_grid = @intFromBool(d.energy_grid),
+        .grid_step = d.grid_step,
     };
 }
 
 export fn kzbb_free_count(free_mask: u32) c_int {
     return @popCount(free_mask & ((1 << n_parameters) - 1));
+}
+
+const Prepared = struct {
+    params: kerrbb.Params,
+    free: kerrbb.FreeSet,
+    edges: []const f64,
+    flux: []f64,
+    jacobian: ?[]f64,
+};
+
+fn prepare(
+    params: ?*const Params,
+    free_mask: u32,
+    edges: ?[*]const f64,
+    n_bins: usize,
+    flux: ?[*]f64,
+    jacobian: ?[*]f64,
+) ?Prepared {
+    const p = params orelse return null;
+    const e = edges orelse return null;
+    const f = flux orelse return null;
+    if (n_bins == 0) return null;
+    if (free_mask >> n_parameters != 0) return null;
+    var free: kerrbb.FreeSet = .initEmpty();
+    for (std.enums.values(Parameter)) |par| {
+        if (free_mask & (@as(u32, 1) << @intCast(@intFromEnum(par))) != 0) free.insert(par);
+    }
+    const n_free = free.count();
+    if (n_free > 0 and jacobian == null) return null;
+    return .{
+        .params = .{
+            .eta = p.eta,
+            .a = p.a,
+            .incl = p.incl,
+            .mass = p.mass,
+            .mdot = p.mdot,
+            .distance = p.distance,
+            .fcol = p.fcol,
+            .norm = p.norm,
+            .r_in = if (p.use_r_in != 0) p.r_in else null,
+            .limb_darkening = p.limb_darkening != 0,
+            .returning_radiation = p.returning_radiation != 0,
+        },
+        .free = free,
+        .edges = e[0 .. n_bins + 1],
+        .flux = f[0..n_bins],
+        .jacobian = if (n_free > 0) jacobian.?[0 .. n_bins * n_free] else null,
+    };
 }
 
 export fn kzbb_evaluate(
@@ -101,43 +179,46 @@ export fn kzbb_evaluate(
     jacobian: ?[*]f64,
     options: ?*const Options,
 ) c_int {
-    const p = params orelse return @intFromEnum(Status.invalid_argument);
-    const e = edges orelse return @intFromEnum(Status.invalid_argument);
-    const f = flux orelse return @intFromEnum(Status.invalid_argument);
-    if (n_bins == 0) return @intFromEnum(Status.invalid_argument);
-    if (free_mask >> n_parameters != 0) return @intFromEnum(Status.invalid_argument);
-
-    var free: kerrbb.FreeSet = .initEmpty();
-    for (std.enums.values(Parameter)) |par| {
-        if (free_mask & (@as(u32, 1) << @intCast(@intFromEnum(par))) != 0) free.insert(par);
-    }
-    const n_free = free.count();
-    if (n_free > 0 and jacobian == null) return @intFromEnum(Status.invalid_argument);
-
-    const zp: kerrbb.Params = .{
-        .eta = p.eta,
-        .a = p.a,
-        .incl = p.incl,
-        .mass = p.mass,
-        .mdot = p.mdot,
-        .distance = p.distance,
-        .fcol = p.fcol,
-        .norm = p.norm,
-        .r_in = if (p.use_r_in != 0) p.r_in else null,
-        .limb_darkening = p.limb_darkening != 0,
-        .returning_radiation = p.returning_radiation != 0,
-    };
+    const q = prepare(params, free_mask, edges, n_bins, flux, jacobian) orelse
+        return @intFromEnum(Status.invalid_argument);
+    if (options) |o| if (!validOptions(o.*)) return @intFromEnum(Status.invalid_argument);
     const opts = if (options) |o| toOptions(o.*) else kerrbb.Options{};
+    kerrbb.evaluate(std.heap.c_allocator, q.params, q.free, q.edges, q.flux, q.jacobian, opts) catch |err|
+        return @intFromEnum(statusFromError(err));
+    return @intFromEnum(Status.success);
+}
 
-    kerrbb.evaluate(
-        std.heap.c_allocator,
-        zp,
-        free,
-        e[0 .. n_bins + 1],
-        f[0..n_bins],
-        if (n_free > 0) jacobian.?[0 .. n_bins * n_free] else null,
-        opts,
-    ) catch |err| return @intFromEnum(statusFromError(err));
+/// Opaque model handle with a cache of the ray tracing.
+pub const Model = kerrbb.Model;
+
+export fn kzbb_model_create(options: ?*const Options) ?*Model {
+    if (options) |o| if (!validOptions(o.*)) return null;
+    const opts = if (options) |o| toOptions(o.*) else kerrbb.Options{};
+    const m = std.heap.c_allocator.create(Model) catch return null;
+    m.* = .init(std.heap.c_allocator, opts);
+    return m;
+}
+
+export fn kzbb_model_destroy(model: ?*Model) void {
+    const m = model orelse return;
+    m.deinit();
+    std.heap.c_allocator.destroy(m);
+}
+
+export fn kzbb_model_evaluate(
+    model: ?*Model,
+    params: ?*const Params,
+    free_mask: u32,
+    edges: ?[*]const f64,
+    n_bins: usize,
+    flux: ?[*]f64,
+    jacobian: ?[*]f64,
+) c_int {
+    const m = model orelse return @intFromEnum(Status.invalid_argument);
+    const q = prepare(params, free_mask, edges, n_bins, flux, jacobian) orelse
+        return @intFromEnum(Status.invalid_argument);
+    m.evaluate(q.params, q.free, q.edges, q.flux, q.jacobian) catch |err|
+        return @intFromEnum(statusFromError(err));
     return @intFromEnum(Status.success);
 }
 
@@ -189,6 +270,18 @@ test "C API evaluates and reports errors" {
     try kerrbb.evaluate(testing.allocator, .{ .a = 0.9, .incl = 45, .mass = 10, .mdot = 1, .distance = 10 }, kerrbb.FreeSet.initMany(&.{ .a, .fcol }), &edges, &ref, &ref_jac, toOptions(opts));
     try testing.expectEqualSlices(f64, &ref, &flux);
     try testing.expectEqualSlices(f64, &ref_jac, &jac);
+
+    const model = kzbb_model_create(&opts) orelse return error.ModelCreateFailed;
+    defer kzbb_model_destroy(model);
+    var flux_m: [2]f64 = undefined;
+    var jac_m: [4]f64 = undefined;
+    try testing.expectEqual(@as(c_int, 0), kzbb_model_evaluate(model, &p, mask, &edges, 2, &flux_m, &jac_m));
+    try testing.expectEqualSlices(f64, &flux, &flux_m);
+    try testing.expectEqualSlices(f64, &jac, &jac_m);
+
+    var bad = opts;
+    bad.n_energy = 0;
+    try testing.expect(kzbb_model_create(&bad) == null);
 
     p.a = 0;
     try testing.expectEqual(@intFromEnum(Status.spin_out_of_range), kzbb_evaluate(&p, 0, &edges, 2, &flux, null, &opts));

@@ -97,7 +97,7 @@ pub fn main() !void {
             const edges = c.edges orelse return error.MissingEdges;
             const out = try allocator.alloc(D0, ref.len);
             defer allocator.free(out);
-            spec.binned(edges, out, 4);
+            try spec.binned(edges, out, 4);
             for (ours, out, energies, 0..) |*o, v, *eo, b| {
                 o.* = v.x;
                 eo.* = @sqrt(edges[b] * edges[b + 1]);

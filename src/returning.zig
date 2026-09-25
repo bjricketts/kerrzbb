@@ -30,6 +30,7 @@ const std = @import("std");
 const kerrz = @import("kerrz");
 const disc = @import("disc.zig");
 const quadrature = @import("quadrature.zig");
+const parallel = @import("parallel.zig");
 
 pub const Options = struct {
     /// Radial nodes between r_in and r_max, clustered toward r_in.
@@ -40,6 +41,8 @@ pub const Options = struct {
     n_chi: usize = 24,
     /// Outermost node.
     r_max: f64 = 1e4,
+    /// Threads for building the kernel (0: one per CPU).
+    n_threads: usize = 1,
 };
 
 pub const Error = std.mem.Allocator.Error || error{SingularSystem};
@@ -284,6 +287,93 @@ fn innerEdge(
     return edge;
 }
 
+/// Kernel rows for a range of absorbing radii (see `buildKernel`).
+fn KernelRows(comptime T: type) type {
+    const A = T.Algebra;
+    return struct {
+        nodes: []const T,
+        k_in: []T,
+        k_s: []T,
+        metric: kerrz.KerrMetric(T),
+        horizon: f64,
+        dchi: f64,
+        xg: []const f64,
+        wg: []const f64,
+        a: T,
+        r_in: T,
+        limb_darkening: bool,
+        opts: Options,
+
+        /// Kernel rows for absorbing radii [start, end).
+        fn run(c: @This(), start: usize, end: usize) Error!void {
+            const nodes = c.nodes;
+            const k_in = c.k_in;
+            const k_s = c.k_s;
+            const metric = c.metric;
+            const horizon = c.horizon;
+            const dchi = c.dchi;
+            const xg = c.xg;
+            const wg = c.wg;
+            const a = c.a;
+            const r_in = c.r_in;
+            const limb_darkening = c.limb_darkening;
+            const opts = c.opts;
+            const n = nodes.len;
+            for (start..end) |i| {
+                const r_a = nodes[i];
+                const loc = Local(T).init(r_a, a);
+                const psi_min = 0.02 * @min(1.0, horizon / r_a.x);
+
+                for (0..opts.n_chi) |ic| {
+                    const chi = (@as(f64, @floatFromInt(ic)) + 0.5) * dchi;
+                    const psi_in = innerEdge(T, a, r_a, r_in, chi, psi_min) orelse continue;
+
+                    // psi = psi_in + (pi - psi_in) (e^{kappa t} - 1) / (e^kappa - 1),
+                    // clustering nodes on a scale ~0.1 psi_in above the edge.
+                    const width = A.sub(.promote(std.math.pi), psi_in);
+                    const kappa = A.log(A.add(.one, A.div(width, A.mult(.promote(0.1), psi_in))));
+                    const denom = A.sub(A.exp(kappa), .one);
+
+                    for (0..opts.n_psi) |ip| {
+                        const t = 0.5 * (xg[ip] + 1);
+                        const e_kt = A.exp(A.mult(kappa, .promote(t)));
+                        const psi = A.add(psi_in, A.div(A.mult(width, A.sub(e_kt, .one)), denom));
+                        const dpsi_dt = A.div(A.mult(A.mult(width, kappa), e_kt), denom);
+                        // d Omega = sin(psi) d psi d chi
+                        const w_ray = A.mult(A.mult(dpsi_dt, A.sin(psi)), .promote(0.5 * wg[ip] * dchi));
+
+                        const ray = Ray(T).trace(metric, loc, r_a, psi, chi);
+                        if (!ray.crossed or ray.r_e.x < r_in.x) continue;
+                        const r_e = ray.r_e;
+                        const lambda = ray.geod.lambda;
+                        const src = Local(T).init(r_e, a);
+                        const g_hat = A.div(src.redshiftFactor(lambda), loc.redshiftFactor(lambda));
+                        if (!(g_hat.x > 0)) continue;
+
+                        var coeff = A.mult(A.div(w_ray, .promote(std.math.pi)), A.mult(A.powi(g_hat, 4), ray.nz));
+                        if (limb_darkening) {
+                            // cos theta_e = sqrt(eta) (E - Omega L)_e / (r_e |1 - Omega_e lambda|)  (eq. C23)
+                            const d = A.abs(A.sub(.one, A.mult(src.orb.omega, lambda)));
+                            const cos_e = A.div(A.mult(A.sqrt(ray.geod.eta), src.orb.energyFactor()), A.mult(r_e, d));
+                            coeff = A.mult(coeff, A.add(.promote(0.5), A.mult(.promote(0.75), cos_e)));
+                        }
+                        const coeff_s = A.mult(coeff, A.mult(loc.b, ray.nphi));
+
+                        const wt = weights(T, nodes, r_e);
+                        inline for (0..2) |k| {
+                            const j = wt.idx[k];
+                            if (j != std.math.maxInt(usize)) {
+                                k_in[i * n + j] = A.add(k_in[i * n + j], A.mult(coeff, wt.w[k]));
+                                k_s[i * n + j] = A.add(k_s[i * n + j], A.mult(coeff_s, wt.w[k]));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+}
+
 /// Build the returning-radiation kernel for spin `a` and inner radius `r_in`.
 ///
 /// At each absorbing radius and azimuth chi around the black hole direction,
@@ -299,7 +389,6 @@ pub fn buildKernel(
     limb_darkening: bool,
     opts: Options,
 ) Error!Kernel(T) {
-    const A = T.Algebra;
     const n = opts.n_radii;
     std.debug.assert(n >= 3);
 
@@ -323,57 +412,21 @@ pub fn buildKernel(
     const horizon = metric.horizon_radius.x;
     const dchi = std.math.pi / @as(f64, @floatFromInt(opts.n_chi));
 
-    for (0..n) |i| {
-        const r_a = nodes[i];
-        const loc = Local(T).init(r_a, a);
-        const psi_min = 0.02 * @min(1.0, horizon / r_a.x);
-
-        for (0..opts.n_chi) |ic| {
-            const chi = (@as(f64, @floatFromInt(ic)) + 0.5) * dchi;
-            const psi_in = innerEdge(T, a, r_a, r_in, chi, psi_min) orelse continue;
-
-            // psi = psi_in + (pi - psi_in) (e^{kappa t} - 1) / (e^kappa - 1),
-            // clustering nodes on a scale ~0.1 psi_in above the edge.
-            const width = A.sub(.promote(std.math.pi), psi_in);
-            const kappa = A.log(A.add(.one, A.div(width, A.mult(.promote(0.1), psi_in))));
-            const denom = A.sub(A.exp(kappa), .one);
-
-            for (0..opts.n_psi) |ip| {
-                const t = 0.5 * (xg[ip] + 1);
-                const e_kt = A.exp(A.mult(kappa, .promote(t)));
-                const psi = A.add(psi_in, A.div(A.mult(width, A.sub(e_kt, .one)), denom));
-                const dpsi_dt = A.div(A.mult(A.mult(width, kappa), e_kt), denom);
-                // d Omega = sin(psi) d psi d chi
-                const w_ray = A.mult(A.mult(dpsi_dt, A.sin(psi)), .promote(0.5 * wg[ip] * dchi));
-
-                const ray = Ray(T).trace(metric, loc, r_a, psi, chi);
-                if (!ray.crossed or ray.r_e.x < r_in.x) continue;
-                const r_e = ray.r_e;
-                const lambda = ray.geod.lambda;
-                const src = Local(T).init(r_e, a);
-                const g_hat = A.div(src.redshiftFactor(lambda), loc.redshiftFactor(lambda));
-                if (!(g_hat.x > 0)) continue;
-
-                var coeff = A.mult(A.div(w_ray, .promote(std.math.pi)), A.mult(A.powi(g_hat, 4), ray.nz));
-                if (limb_darkening) {
-                    // cos theta_e = sqrt(eta) (E - Omega L)_e / (r_e |1 - Omega_e lambda|)  (eq. C23)
-                    const d = A.abs(A.sub(.one, A.mult(src.orb.omega, lambda)));
-                    const cos_e = A.div(A.mult(A.sqrt(ray.geod.eta), src.orb.energyFactor()), A.mult(r_e, d));
-                    coeff = A.mult(coeff, A.add(.promote(0.5), A.mult(.promote(0.75), cos_e)));
-                }
-                const coeff_s = A.mult(coeff, A.mult(loc.b, ray.nphi));
-
-                const wt = weights(T, nodes, r_e);
-                inline for (0..2) |k| {
-                    const j = wt.idx[k];
-                    if (j != std.math.maxInt(usize)) {
-                        k_in[i * n + j] = A.add(k_in[i * n + j], A.mult(coeff, wt.w[k]));
-                        k_s[i * n + j] = A.add(k_s[i * n + j], A.mult(coeff_s, wt.w[k]));
-                    }
-                }
-            }
-        }
-    }
+    const Ctx = KernelRows(T);
+    try parallel.forRange(Error, opts.n_threads, n, Ctx{
+        .nodes = nodes,
+        .k_in = k_in,
+        .k_s = k_s,
+        .metric = metric,
+        .horizon = horizon,
+        .dchi = dchi,
+        .xg = xg,
+        .wg = wg,
+        .a = a,
+        .r_in = r_in,
+        .limb_darkening = limb_darkening,
+        .opts = opts,
+    }, Ctx.run);
 
     return .{ .allocator = allocator, .a = a, .r_in = r_in, .nodes = nodes, .k_in = k_in, .k_s = k_s };
 }

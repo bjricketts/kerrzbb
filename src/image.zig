@@ -23,6 +23,7 @@ const std = @import("std");
 const kerrz = @import("kerrz");
 const disc = @import("disc.zig");
 const quadrature = @import("quadrature.zig");
+const parallel = @import("parallel.zig");
 
 const KerrMetric = kerrz.KerrMetric;
 const FourVector = kerrz.FourVector;
@@ -72,6 +73,8 @@ pub const Options = struct {
     r_out: f64 = 1e6,
     /// Observer radius used to launch rays.
     observer_distance: f64 = 1e12,
+    /// Threads for the ray tracing (0: one per CPU).
+    n_threads: usize = 1,
 };
 
 /// Check the spin and inclination ranges supported by the ray tracing.
@@ -304,33 +307,56 @@ pub fn traceImage(
     quadrature.gaussLegendre(x, w);
     const dtheta = 2.0 * std.math.pi / @as(f64, @floatFromInt(opts.n_theta));
 
-    var k: usize = 0;
-    for (0..opts.n_theta) |j| {
-        const theta = trapezoidAngle(j, opts.n_theta);
-        const rho_in = try contour(T, s, theta, r_in, opts.observer_distance);
-        const rho_out = try contour(T, s, theta, .promote(opts.r_break), opts.observer_distance);
-        const log_in = A.log(rho_in);
-        const log_span = A.sub(A.log(rho_out), log_in);
+    const Ctx = struct {
+        s: Setup(T),
+        r_in: T,
+        x: []const f64,
+        w: []const f64,
+        dtheta: f64,
+        out: []Sample(T),
+        opts: Options,
 
-        for (0..opts.n_rho) |i| {
-            const u = 0.5 * (x[i] + 1);
-            const rho = A.exp(A.add(log_in, A.mult(.promote(u), log_span)));
-            // d alpha d beta = rho d rho d theta, with d rho = rho log_span du.
-            const weight = A.mult(
-                A.mult(A.powi(rho, 2), log_span),
-                .promote(0.5 * w[i] * dtheta),
-            );
-            const ab = toImpact(T, rho, theta);
-            const hit = s.cross(ab[0], ab[1]);
-            if (hit.captured) {
-                out[k] = .{ .weight = .zero, .r = r_in, .g = .one, .cos_em = .one };
-            } else {
-                const em = s.emission(hit.r, hit.geod.lambda, hit.geod.eta);
-                out[k] = .{ .weight = weight, .r = hit.r, .g = em.g, .cos_em = em.cos_em };
+        /// Samples for image angles [start, end); each angle owns n_rho
+        /// consecutive entries of `out`.
+        fn run(c: @This(), start: usize, end: usize) Error!void {
+            for (start..end) |j| {
+                const theta = trapezoidAngle(j, c.opts.n_theta);
+                const rho_in = try contour(T, c.s, theta, c.r_in, c.opts.observer_distance);
+                const rho_out = try contour(T, c.s, theta, .promote(c.opts.r_break), c.opts.observer_distance);
+                const log_in = A.log(rho_in);
+                const log_span = A.sub(A.log(rho_out), log_in);
+
+                for (0..c.opts.n_rho) |i| {
+                    const u = 0.5 * (c.x[i] + 1);
+                    const rho = A.exp(A.add(log_in, A.mult(.promote(u), log_span)));
+                    // d alpha d beta = rho d rho d theta, with d rho = rho log_span du.
+                    const weight = A.mult(
+                        A.mult(A.powi(rho, 2), log_span),
+                        .promote(0.5 * c.w[i] * c.dtheta),
+                    );
+                    const ab = toImpact(T, rho, theta);
+                    const hit = c.s.cross(ab[0], ab[1]);
+                    const k = j * c.opts.n_rho + i;
+                    if (hit.captured) {
+                        c.out[k] = .{ .weight = .zero, .r = c.r_in, .g = .one, .cos_em = .one };
+                    } else {
+                        const em = c.s.emission(hit.r, hit.geod.lambda, hit.geod.eta);
+                        c.out[k] = .{ .weight = weight, .r = hit.r, .g = em.g, .cos_em = em.cos_em };
+                    }
+                }
             }
-            k += 1;
         }
-    }
+    };
+    try parallel.forRange(Error, opts.n_threads, opts.n_theta, Ctx{
+        .s = s,
+        .r_in = r_in,
+        .x = x,
+        .w = w,
+        .dtheta = dtheta,
+        .out = out,
+        .opts = opts,
+    }, Ctx.run);
+    const k = opts.n_theta * opts.n_rho;
 
     try outerSamples(T, allocator, s, out[k..], opts);
     return out;

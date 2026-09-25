@@ -16,7 +16,7 @@ import ForwardDiff
 import SpectralFitting
 using SpectralFitting: AbstractSpectralModel, Additive, FitParam
 
-export kerrzbb_flux, KerrzBBOptions, KerrzBBModel, PARAMETERS
+export kerrzbb_flux, KerrzBBOptions, KerrzBBCache, KerrzBBModel, PARAMETERS
 
 "Parameter names in Jacobian-column order (bit k of the free mask)."
 const PARAMETERS = (:eta, :a, :incl, :mass, :mdot, :distance, :fcol, :norm, :r_in)
@@ -36,7 +36,7 @@ struct CParams
     returning_radiation::Cint
 end
 
-"Numerical options; `KerrzBBOptions(; n_theta = 64, ...)` overrides the defaults."
+"Numerical options; `KerrzBBOptions(; n_theta = 64, n_threads = 0, ...)` overrides the defaults."
 struct KerrzBBOptions
     n_theta::Csize_t
     n_rho::Csize_t
@@ -45,6 +45,13 @@ struct KerrzBBOptions
     r_break::Cdouble
     r_out::Cdouble
     observer_distance::Cdouble
+    n_radii::Csize_t
+    n_psi::Csize_t
+    n_chi::Csize_t
+    r_max::Cdouble
+    n_threads::Csize_t
+    energy_grid::Cint
+    grid_step::Cdouble
 end
 
 const _handle = Ref{Ptr{Cvoid}}(C_NULL)
@@ -80,15 +87,39 @@ end
 Base.showerror(io::IO, e::KerrzBBError) = print(io, "kerrzbb error ", e.code, ": ", e.message)
 
 """
+    KerrzBBCache(options)
+
+Handle to a kerrzbb model with a cache of the ray tracing. Pass it as
+`cache` to `kerrzbb_flux` so repeated calls that change only mass, mdot,
+distance, fcol, eta or norm skip the ray tracing. Not thread-safe.
+"""
+mutable struct KerrzBBCache
+    ptr::Ptr{Cvoid}
+    options::KerrzBBOptions
+    function KerrzBBCache(options::KerrzBBOptions = default_options())
+        ptr = ccall(_sym(:kzbb_model_create), Ptr{Cvoid}, (Ref{KerrzBBOptions},), options)
+        ptr == C_NULL && throw(ArgumentError("invalid kerrzbb options"))
+        c = new(ptr, options)
+        finalizer(c) do x
+            x.ptr != C_NULL && ccall(_sym(:kzbb_model_destroy), Cvoid, (Ptr{Cvoid},), x.ptr)
+            x.ptr = C_NULL
+        end
+        c
+    end
+end
+
+"""
     kerrzbb_flux(edges; a, incl, mass, mdot, distance, eta = 0, fcol = 1.7,
                  norm = 1, r_in = nothing, limb_darkening = false,
-                 returning_radiation = false, free = (), options = default_options())
+                 returning_radiation = false, free = (), options = default_options(),
+                 cache = nothing)
 
 Photon flux per bin (photons cm⁻² s⁻¹) for bin `edges` in keV. With a
 non-empty `free` (a collection of names from `PARAMETERS`) returns
 `(flux, jacobian)` where `jacobian[b, k]` is the derivative of bin `b` with
 respect to the `k`-th free parameter in `PARAMETERS` order. The inclination and
-its derivative are in degrees.
+its derivative are in degrees. With `cache::KerrzBBCache` the cache's
+options are used instead of `options`.
 """
 function kerrzbb_flux(
     edges::AbstractVector{<:Real};
@@ -96,6 +127,7 @@ function kerrzbb_flux(
     eta = 0.0, fcol = 1.7, norm = 1.0, r_in = nothing,
     limb_darkening::Bool = false, returning_radiation::Bool = false,
     free = (), options::KerrzBBOptions = default_options(),
+    cache::Union{Nothing,KerrzBBCache} = nothing,
 )
     e = collect(Float64, edges)
     n_bins = length(e) - 1
@@ -113,11 +145,20 @@ function kerrzbb_flux(
     flux = Vector{Float64}(undef, n_bins)
     # C writes row-major (bin, parameter): allocate transposed and permute.
     jac_t = Matrix{Float64}(undef, n_free, n_bins)
-    status = ccall(
-        _sym(:kzbb_evaluate), Cint,
-        (Ref{CParams}, UInt32, Ptr{Cdouble}, Csize_t, Ptr{Cdouble}, Ptr{Cdouble}, Ref{KerrzBBOptions}),
-        p, mask, e, n_bins, flux, n_free > 0 ? pointer(jac_t) : Ptr{Cdouble}(C_NULL), options,
-    )
+    jac_ptr = n_free > 0 ? pointer(jac_t) : Ptr{Cdouble}(C_NULL)
+    status = if isnothing(cache)
+        ccall(
+            _sym(:kzbb_evaluate), Cint,
+            (Ref{CParams}, UInt32, Ptr{Cdouble}, Csize_t, Ptr{Cdouble}, Ptr{Cdouble}, Ref{KerrzBBOptions}),
+            p, mask, e, n_bins, flux, jac_ptr, options,
+        )
+    else
+        GC.@preserve cache ccall(
+            _sym(:kzbb_model_evaluate), Cint,
+            (Ptr{Cvoid}, Ref{CParams}, UInt32, Ptr{Cdouble}, Csize_t, Ptr{Cdouble}, Ptr{Cdouble}),
+            cache.ptr, p, mask, e, n_bins, flux, jac_ptr,
+        )
+    end
     if status != 0
         msg = unsafe_string(ccall(_sym(:kzbb_status_string), Cstring, (Cint,), status))
         throw(KerrzBBError(status, msg))
@@ -128,15 +169,17 @@ end
 # ---------------------------------------------------------------------------
 # SpectralFitting.jl model
 
-"Non-fitted configuration carried by `KerrzBBModel`."
+"Non-fitted configuration carried by `KerrzBBModel`, including the ray-tracing cache."
 struct KerrzBBConfig
     limb_darkening::Bool
-    options::KerrzBBOptions
+    returning_radiation::Bool
+    cache::KerrzBBCache
 end
 
 """
     KerrzBBModel(; K, eta, a, incl, mass, mdot, distance, fcol,
-                 limb_darkening = false, options = KerrzBBOptions())
+                 limb_darkening = false, returning_radiation = false,
+                 options = KerrzBBOptions())
 
 Additive SpectralFitting.jl model. `K` is SpectralFitting's normalisation
 (kerrbb's `norm`). Units follow XSPEC kerrbb: `incl` in degrees, `mdot` in
@@ -145,7 +188,9 @@ supported, so fits should start away from a = 0.
 
 Derivatives: when SpectralFitting differentiates with ForwardDiff, the model
 calls kerrzbb once with the needed Jacobian columns and assembles the dual
-output from it. Nested duals (Hessians) are not supported.
+output from it. Nested duals (Hessians) are not supported. The model keeps a
+ray-tracing cache, so it is not safe to invoke one instance from several
+threads at once.
 """
 struct KerrzBBModel{T,C} <: AbstractSpectralModel{T,Additive}
     config::C
@@ -177,9 +222,11 @@ function KerrzBBModel(;
     distance = FitParam(10.0; frozen = true, lower_limit = 1e-3, upper_limit = 1e5),
     fcol = FitParam(1.7; frozen = true, lower_limit = 1.0, upper_limit = 3.0),
     limb_darkening::Bool = false,
+    returning_radiation::Bool = false,
     options::KerrzBBOptions = KerrzBBOptions(),
 )
-    KerrzBBModel(KerrzBBConfig(limb_darkening, options), K, eta, a, incl, mass, mdot, distance, fcol)
+    config = KerrzBBConfig(limb_darkening, returning_radiation, KerrzBBCache(options))
+    KerrzBBModel(config, K, eta, a, incl, mass, mdot, distance, fcol)
 end
 
 const _MODEL_PARAMS = (:eta, :a, :incl, :mass, :mdot, :distance, :fcol)
@@ -189,8 +236,9 @@ _params(m::KerrzBBModel) = (m.eta, m.a, m.incl, m.mass, m.mdot, m.distance, m.fc
 function _flux(domain, config::KerrzBBConfig, vals; free = ())
     kerrzbb_flux(domain; eta = vals[1], a = vals[2], incl = vals[3], mass = vals[4],
                  mdot = vals[5], distance = vals[6], fcol = vals[7], norm = 1.0,
-                 limb_darkening = config.limb_darkening, options = config.options,
-                 free = free)
+                 limb_darkening = config.limb_darkening,
+                 returning_radiation = config.returning_radiation,
+                 cache = config.cache, free = free)
 end
 
 function SpectralFitting.invoke!(output, domain, model::KerrzBBModel)

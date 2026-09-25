@@ -78,16 +78,59 @@ pub fn evaluate(
     jacobian: ?[]f64,
     opts: Options,
 ) Error!void {
+    return evaluateCached(allocator, params, free, edges, flux, jacobian, opts, null);
+}
+
+fn evaluateCached(
+    allocator: std.mem.Allocator,
+    params: Params,
+    free: FreeSet,
+    edges: []const f64,
+    flux: []f64,
+    jacobian: ?[]f64,
+    opts: Options,
+    cache: ?*spectrum.Cache,
+) Error!void {
     std.debug.assert(flux.len + 1 == edges.len);
     if (free.contains(.r_in) and params.r_in == null) return Error.FreeInnerRadiusWithoutValue;
     const n_free = if (jacobian != null) free.count() else 0;
     if (jacobian) |j| if (j.len != flux.len * n_free) return Error.JacobianSizeMismatch;
-
     inline for (0..@typeInfo(Parameter).@"enum".fields.len + 1) |n| {
-        if (n == n_free) return evaluateN(n, allocator, params, free, edges, flux, jacobian, opts);
+        if (n == n_free) return evaluateN(n, allocator, params, free, edges, flux, jacobian, opts, cache);
     }
     unreachable;
 }
+
+/// A model instance that caches the ray tracing between calls. The image
+/// samples depend only on (a, i, r_in) and the returning-radiation kernel only
+/// on (a, r_in, lflag), so fits that vary M, Mdot, D, fcol, eta or norm reuse
+/// them. Not thread-safe; use one instance per thread (each call can itself
+/// use `options.n_threads` threads).
+pub const Model = struct {
+    allocator: std.mem.Allocator,
+    options: Options,
+    cache: spectrum.Cache,
+
+    pub fn init(allocator: std.mem.Allocator, options: Options) Model {
+        return .{ .allocator = allocator, .options = options, .cache = .init(allocator) };
+    }
+
+    pub fn deinit(self: *Model) void {
+        self.cache.deinit();
+    }
+
+    /// As `evaluate`, with this model's options and cache.
+    pub fn evaluate(
+        self: *Model,
+        params: Params,
+        free: FreeSet,
+        edges: []const f64,
+        flux: []f64,
+        jacobian: ?[]f64,
+    ) Error!void {
+        return evaluateCached(self.allocator, params, free, edges, flux, jacobian, self.options, &self.cache);
+    }
+};
 
 fn evaluateN(
     comptime N: usize,
@@ -98,6 +141,7 @@ fn evaluateN(
     flux: []f64,
     jacobian: ?[]f64,
     opts: Options,
+    cache: ?*spectrum.Cache,
 ) Error!void {
     const T = kerrz.DualNumber(f64, N);
 
@@ -130,9 +174,9 @@ fn evaluateN(
 
     const out = try allocator.alloc(T, flux.len);
     defer allocator.free(out);
-    const spec = try spectrum.Spectrum(T).init(allocator, p, opts);
+    const spec = try spectrum.Spectrum(T).initCached(allocator, p, opts, cache);
     defer spec.deinit();
-    spec.binned(edges, out, opts.n_energy);
+    try spec.binned(edges, out, opts.n_energy);
 
     for (out, 0..) |v, b| {
         flux[b] = v.x;
@@ -306,6 +350,36 @@ test "Jacobian columns do not depend on which other parameters are free" {
     for (0..4) |b| for (cols, 0..) |c, k| {
         try testing.expectApproxEqRel(full[b * 9 + c], part[b * 3 + k], 1e-12);
     };
+}
+
+test "cached model reuses the ray tracing and gives identical results" {
+    var p = baseParams();
+    p.returning_radiation = true;
+    const opts: Options = .{ .image = test_opts.image, .returning = .{ .n_radii = 16, .n_psi = 16, .n_chi = 8 }, .n_threads = 3 };
+    var model = Model.init(testing.allocator, opts);
+    defer model.deinit();
+    const free = FreeSet.initMany(&.{ .a, .mdot });
+    var flux: [4]f64 = undefined;
+    var jac: [8]f64 = undefined;
+    var ref: [4]f64 = undefined;
+    var ref_jac: [8]f64 = undefined;
+    for ([_]f64{ 1.5, 2.0, 2.5 }) |mdot| {
+        p.mdot = mdot;
+        try model.evaluate(p, free, &test_edges, &flux, &jac);
+        var serial = opts;
+        serial.n_threads = 1;
+        try evaluate(testing.allocator, p, free, &test_edges, &ref, &ref_jac, serial);
+        try testing.expectEqualSlices(f64, &ref, &flux);
+        try testing.expectEqualSlices(f64, &ref_jac, &jac);
+    }
+    try testing.expectEqual(@as(usize, 2), model.cache.geometry_hits);
+    try testing.expectEqual(@as(usize, 2), model.cache.kernel_hits);
+    // A value-only call uses the plain-number cache entries.
+    try model.evaluate(p, .initEmpty(), &test_edges, &flux, null);
+    try testing.expectApproxEqRel(ref[0], flux[0], 1e-12);
+    p.a = 0.7;
+    try model.evaluate(p, free, &test_edges, &flux, &jac);
+    try testing.expectEqual(@as(usize, 2), model.cache.geometry_hits);
 }
 
 test "input validation" {
