@@ -303,3 +303,46 @@ Candidates are listed in Q3: a C ABI for an XSPEC local model, a Python ctypes w
 - **Julia bindings verified (2026-09-25).** The tests pass on Ben's Mac (Julia 1.13, aarch64): the ccall wrapper, the cache, and ForwardDiff through `KerrzBBModel` matching kerrzbb's Jacobian to 1e-12.
   - Installation needs the University of Bristol AstroRegistry, which holds SpectralFitting and MultiLinearInterpolations.
   - `Libdl` is taken from Base, not declared as a dependency, because the Julia 1.13 resolver rejected the stdlib entry.
+
+## CTF comparison (Fergus's suggestion)
+
+`zig build ctf-compare -Doptimize=ReleaseFast` (~3 min), then `python validation/plot_ctf_compare.py`.
+Figures: `validation/ctf_{cost,tabulated,spectra,gmax}.png`. One thread, 200-bin evaluation.
+Test points sit mid-cell on kerrbb's grid: (a, i) = (0.55, 32.5), (0.917, 62.5), (0.9985, 32.5), (0.9985, 77.5).
+Reference: B1 1024x768 (values); B1 256x192 with duals (derivatives). This measures integration
+and interpolation error only; both methods share kerrz and the weak-field region (r > 1e3).
+
+CTF path as it would be used in practice: tables built once per (a, i) node and stored; per radius
+S(phi) = both branches of pi f/g on midpoint nodes in phi (g* = (1 - cos phi)/2, spectrally accurate),
+resampled from the kerrz traces with 4-point Lagrange; evaluation by Gauss-Legendre in log r with
+cubic interpolation between table radii; (a, i) interpolation linear or cubic, node-wise.
+
+kerrz issues found (worked around in validation/ctf_compare.zig, to report upstream):
+1. `isPathological` rejects traces with J > 1e6 (absolute) while J ~ r^2: near-extremum traces are
+   dropped for r >~ 500, g_min/g_max underestimated, f suppressed near the g* edges; dA/dr 4.6% low
+   at r = 1000, i = 30. Workaround: parabolic re-estimate of the extrema.
+2. Autodiff d r / d beta is inaccurate near the alpha axis (beta = 0): 38% low at 1e-6 rad, 3% at
+   1e-5, 0.16% at 1e-4, < 1e-4 beyond 1e-3 (checked against FD). kerrz's extremum search places traces
+   there, so f at the g* edge is wrong. Workaround: skip traces with |sin theta| < 1e-3.
+   Effect on B1 checked directly (scratch test, 4th-order FD with h = 1e-4, rho = 3-95,
+   a = 0.55/0.998, i = 32.5/75): the derivatives B1 uses (d r/d rho, d r/d a, d r/d i at fixed
+   image angle) are affected far less than d r/d beta: |AD - FD|/r <= 7e-5 even at 1e-6 rad
+   from the axis, and <= 7e-8 (FD noise level) at B1's nearest node, pi/n_theta >= 3e-3 rad.
+   B1 values use traced r and g only, not these derivatives.
+
+Results:
+- Per evaluation with geometry stored for the exact (a, i): both cost ~0.6-1 us per sample (the
+  energy sum dominates). B1 64x48: 5 ms, <= 4e-7 (1.8e-4 at 77.5 deg). CTF 48 radii: 5 ms,
+  4e-5 to 1.6e-3; 64 radii: 9 ms, 1e-5 to 8e-4. B1 traced from scratch: 7 ms (64x48), 25 ms (128x96).
+- One-off cost per (a, i): B1 image 0.5-7 ms; CTF table 20-150 ms (kerrz root solves plus
+  extremum refinement for ~200 traces per radius).
+- Stored on an (a, i) grid: interpolation dominates for either method. At kerrbb spacing, cubic:
+  5e-5 to 5e-4, 3-5e-3 at 77.5 deg; linear 4e-3 to 2e-2. Halving the spacing gives ~16x (cubic)
+  for B1; CTF plateaus at its own table error. Derivatives of the interpolant: d ln N/da errors
+  1e-4 to 1e-2 relative at kerrbb spacing, against ~1e-8 from B1's dual numbers.
+- Maximum blueshift: B1 need not sample g_max; its integrand is smooth in (theta, rho), so Gauss-
+  Legendre converges spectrally. B1 sample g reach within ~1e-3 of the CTF g_max(r).
+- Conclusion: no speed or accuracy case for a CTF path in kerrzbb. Precomputing geometry on an
+  (a, i) grid would save only the 2-6 ms of tracing per new (a, i), costs 1e-4 to 1e-2 accuracy
+  and exact derivatives, and applies to B1 as much as to CTF. Option: B1 64x48 is converged to
+  <= 4e-7 except at high inclination and could be a faster default for i <~ 70 deg.

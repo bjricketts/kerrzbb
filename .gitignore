@@ -10,3 +10,4 @@ validation/kerrbb_reference.json
 validation/kerrbb_table.json
 zig-out/
 .DS_Store
+validation/ctf_compare.json

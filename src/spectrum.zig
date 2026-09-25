@@ -221,7 +221,6 @@ pub fn Spectrum(comptime T: type) type {
             opts_in: Options,
             cache: ?*Cache,
         ) Error!Self {
-            const A = T.Algebra;
             var opts = opts_in;
             opts.image.n_threads = opts.n_threads;
             opts.returning.n_threads = opts.n_threads;
@@ -296,6 +295,23 @@ pub fn Spectrum(comptime T: type) type {
                 defer kernel.deinit();
                 profile = try returning.solve(T, allocator, kernel, params.eta);
             }
+            return fromSamples(G, allocator, params, opts, samples, r_in, profile);
+        }
+
+        /// Build the emitters from image-plane samples (any construction, e.g.
+        /// the Cunningham transfer-function comparison in validation/) and an
+        /// optional self-irradiated flux profile. `samples` carry the
+        /// geometry slots of `G` (see `lift`).
+        pub fn fromSamples(
+            comptime G: type,
+            allocator: std.mem.Allocator,
+            params: Params(T),
+            opts: Options,
+            samples: []const image.Sample(G),
+            r_in: T,
+            profile: ?returning.Profile(T),
+        ) Error!Self {
+            const A = T.Algebra;
             const n0 = A.mult(params.norm, constants.normalisation(T, params.fcol, params.mass, params.distance));
             const mu = constants.temperatureScale(T, params.fcol, params.mdot, params.mass);
 
