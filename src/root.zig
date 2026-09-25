@@ -7,6 +7,7 @@ pub const kerrz = @import("kerrz");
 pub const constants = @import("constants.zig");
 pub const disc = @import("disc.zig");
 pub const quadrature = @import("quadrature.zig");
+pub const image = @import("image.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
