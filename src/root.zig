@@ -9,7 +9,9 @@ pub const disc = @import("disc.zig");
 pub const quadrature = @import("quadrature.zig");
 pub const image = @import("image.zig");
 pub const spectrum = @import("spectrum.zig");
+pub const returning = @import("returning.zig");
 pub const kerrbb = @import("kerrbb.zig");
+pub const c_api = @import("c_api.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

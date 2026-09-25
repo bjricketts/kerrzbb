@@ -130,7 +130,7 @@ fn evaluateN(
 
     const out = try allocator.alloc(T, flux.len);
     defer allocator.free(out);
-    const spec = try spectrum.Spectrum(T).init(allocator, p, opts.image);
+    const spec = try spectrum.Spectrum(T).init(allocator, p, opts);
     defer spec.deinit();
     spec.binned(edges, out, opts.n_energy);
 
@@ -216,6 +216,81 @@ fn setParam(p: *Params, par: Parameter, v: f64) void {
         .fcol => p.fcol = v,
         .norm => p.norm = v,
         .r_in => p.r_in = v,
+    }
+}
+
+test "Jacobian with returning radiation matches finite differences" {
+    var p = baseParams();
+    p.returning_radiation = true;
+    p.limb_darkening = true;
+    const opts: Options = .{ .image = test_opts.image, .returning = .{ .n_radii = 24, .n_psi = 24, .n_chi = 12 } };
+    const free = FreeSet.initMany(&.{ .eta, .a, .incl, .mdot, .r_in });
+    var flux: [4]f64 = undefined;
+    var jac: [4 * 5]f64 = undefined;
+    try evaluate(testing.allocator, p, free, &test_edges, &flux, &jac, opts);
+
+    // With the returning radiation switched off the flux must be lower.
+    var p0 = p;
+    p0.returning_radiation = false;
+    var flux0: [4]f64 = undefined;
+    try evaluate(testing.allocator, p0, .initEmpty(), &test_edges, &flux0, null, opts);
+    for (flux, flux0) |f, f0| try testing.expect(f > f0);
+
+    var it = free.iterator();
+    var k: usize = 0;
+    while (it.next()) |par| : (k += 1) {
+        const rel: f64 = switch (par) {
+            .a, .incl, .r_in => 3e-4,
+            else => 1e-5,
+        };
+        const h = rel * @max(1.0, @abs(p.get(par)));
+        var pp = p;
+        var pm = p;
+        setParam(&pp, par, p.get(par) + h);
+        setParam(&pm, par, p.get(par) - h);
+        var fp: [4]f64 = undefined;
+        var fm: [4]f64 = undefined;
+        try evaluate(testing.allocator, pp, .initEmpty(), &test_edges, &fp, null, opts);
+        try evaluate(testing.allocator, pm, .initEmpty(), &test_edges, &fm, null, opts);
+        for (0..4) |b| {
+            const fd = (fp[b] - fm[b]) / (2 * h);
+            const tol = 1e-4 * @max(@abs(fd), 1e-2 * flux[b]);
+            testing.expectApproxEqAbs(fd, jac[b * 5 + k], tol) catch |err| {
+                std.debug.print("returning: parameter {s}, bin {d}: dual {e} fd {e}\n", .{ @tagName(par), b, jac[b * 5 + k], fd });
+                return err;
+            };
+        }
+    }
+}
+
+test "spin derivative with returning radiation and r_in at the ISCO" {
+    var p = baseParams();
+    p.r_in = null;
+    p.a = 0.95;
+    p.returning_radiation = true;
+    const opts: Options = .{ .image = test_opts.image, .returning = .{ .n_radii = 24, .n_psi = 24, .n_chi = 12 } };
+    var flux: [4]f64 = undefined;
+    var jac: [4]f64 = undefined;
+    try evaluate(testing.allocator, p, FreeSet.initOne(.a), &test_edges, &flux, &jac, opts);
+    const h = 3e-4;
+    var pp = p;
+    var pm = p;
+    pp.a += h;
+    pm.a -= h;
+    var fp: [4]f64 = undefined;
+    var fm: [4]f64 = undefined;
+    try evaluate(testing.allocator, pp, .initEmpty(), &test_edges, &fp, null, opts);
+    try evaluate(testing.allocator, pm, .initEmpty(), &test_edges, &fm, null, opts);
+    for (0..4) |b| {
+        const fd = (fp[b] - fm[b]) / (2 * h);
+        // The discretised kernel is not exactly smooth in a: rays switch
+        // between landing inside and outside r_in, or being captured, away
+        // from the resolved inner edge. Finite differences with h and h/2
+        // differ by ~1e-3, which sets the tolerance here.
+        testing.expectApproxEqRel(fd, jac[b], 5e-3) catch |err| {
+            std.debug.print("bin {d}: dual {e} fd {e}\n", .{ b, jac[b], fd });
+            return err;
+        };
     }
 }
 

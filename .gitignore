@@ -6,3 +6,6 @@ validation/kerrbb_comparison*
 validation/kerrbb_table.json
 validation/kerrbb_reference.json
 validation/derivative_scan.*
+python/**/__pycache__/
+*.egg-info/
+validation/__pycache__/

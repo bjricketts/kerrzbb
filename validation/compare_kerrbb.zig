@@ -58,7 +58,7 @@ pub fn main() !void {
         results.deinit(allocator);
     }
 
-    std.debug.print("{s:>8} {s:>5} {s:>5} {s:>2} {s:>10} {s:>10} {s:>10}\n", .{ "a", "i", "eta", "ld", "mean", "max|dev|", "at E" });
+    std.debug.print("{s:>8} {s:>5} {s:>5} {s:>2} {s:>2} {s:>10} {s:>10} {s:>10}\n", .{ "a", "i", "eta", "rf", "ld", "mean", "max|dev|", "at E" });
     var sum_worst: f64 = 0;
     for (parsed.value.cases) |c| {
         const ref = c.flux orelse c.density orelse return error.MissingReference;
@@ -66,10 +66,6 @@ pub fn main() !void {
         try results.append(allocator, ours);
         @memset(ours, std.math.nan(f64));
         const ld: u8 = @intCast(c.lflag);
-        if (c.rflag > 0) {
-            std.debug.print("{d:>8.4} {d:>5.1} {d:>5.2} {d:>2}: rflag = 1 not implemented\n", .{ c.a, c.incl_deg, c.eta, ld });
-            continue;
-        }
         const p: kbb.spectrum.Params(D0) = .{
             .eta = .promote(c.eta),
             .a = .promote(c.a),
@@ -80,6 +76,7 @@ pub fn main() !void {
             .fcol = .promote(c.fcol),
             .norm = .promote(c.norm),
             .limb_darkening = c.lflag > 0,
+            .returning_radiation = c.rflag > 0,
         };
         const spec = kbb.spectrum.Spectrum(D0).init(allocator, p, .{}) catch |err| {
             std.debug.print("{d:>8.4} {d:>5.1} {d:>5.2} {d:>2}: {s}\n", .{ c.a, c.incl_deg, c.eta, ld, @errorName(err) });
@@ -125,7 +122,7 @@ pub fn main() !void {
             }
         }
         sum_worst = @max(sum_worst, @abs(worst));
-        std.debug.print("{d:>8.4} {d:>5.1} {d:>5.2} {d:>2} {d:>10.5} {d:>10.5} {d:>10.3}\n", .{ c.a, c.incl_deg, c.eta, ld, sum_ours / sum_ref, worst, worst_e });
+        std.debug.print("{d:>8.4} {d:>5.1} {d:>5.2} {d:>2} {d:>2} {d:>10.5} {d:>10.5} {d:>10.3}\n", .{ c.a, c.incl_deg, c.eta, @as(u8, @intCast(c.rflag)), ld, sum_ours / sum_ref, worst, worst_e });
     }
     std.debug.print("largest deviation over all cases: {d:.5}\n", .{sum_worst});
 
@@ -138,7 +135,7 @@ pub fn main() !void {
         try w.writeAll("{\"cases\": [");
         for (parsed.value.cases, results.items, 0..) |c, ours, k| {
             if (k > 0) try w.writeAll(",");
-            try w.print("{{\"a\": {d}, \"incl_deg\": {d}, \"eta\": {d}, \"lflag\": {d}, ", .{ c.a, c.incl_deg, c.eta, c.lflag });
+            try w.print("{{\"a\": {d}, \"incl_deg\": {d}, \"eta\": {d}, \"rflag\": {d}, \"lflag\": {d}, ", .{ c.a, c.incl_deg, c.eta, c.rflag, c.lflag });
             if (c.edges) |e| {
                 try w.writeAll("\"edges\": ");
                 try std.json.Stringify.value(e, .{}, w);

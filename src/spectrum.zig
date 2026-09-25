@@ -16,6 +16,7 @@ const constants = @import("constants.zig");
 const disc = @import("disc.zig");
 const image = @import("image.zig");
 const quadrature = @import("quadrature.zig");
+const returning = @import("returning.zig");
 
 const D0 = kerrz.DualNumber(f64, 0);
 const D3 = kerrz.DualNumber(f64, 3);
@@ -43,19 +44,21 @@ pub fn Params(comptime T: type) type {
         r_in: ?T = null,
         /// Limb-darkened emission (kerrbb `lflag`), eq. (D20).
         limb_darkening: bool = false,
-        /// Self-irradiation (kerrbb `rflag`). Not implemented yet (M5).
+        /// Self-irradiation (kerrbb `rflag`), Appendix D.
         returning_radiation: bool = false,
     };
 }
 
 pub const Options = struct {
     image: image.Options = .{},
+    /// Grids for the returning-radiation kernel (used when
+    /// `returning_radiation` is set).
+    returning: returning.Options = .{},
     /// Gauss-Legendre nodes per energy bin.
     n_energy: usize = 4,
 };
 
-pub const Error = image.Error || error{
-    ReturningRadiationNotImplemented,
+pub const Error = image.Error || returning.Error || error{
     InnerRadiusBelowIsco,
     InvalidParameter,
 };
@@ -101,10 +104,9 @@ pub fn Spectrum(comptime T: type) type {
         pub fn init(
             allocator: std.mem.Allocator,
             params: Params(T),
-            opts: image.Options,
+            opts: Options,
         ) Error!Self {
             const A = T.Algebra;
-            if (params.returning_radiation) return Error.ReturningRadiationNotImplemented;
             if (params.eta.x < 0 or params.mass.x <= 0 or params.mdot.x <= 0 or
                 params.distance.x <= 0 or params.fcol.x <= 0)
                 return Error.InvalidParameter;
@@ -119,10 +121,28 @@ pub fn Spectrum(comptime T: type) type {
                 break :blk if (T.N == 0) .promote(r.x) else G.promote(r.x).diff(2);
             } else r_ms_g;
 
-            const samples = try image.traceImage(G, allocator, a_g, i_g, r_in_g, opts);
+            const samples = try image.traceImage(G, allocator, a_g, i_g, r_in_g, opts.image);
             defer allocator.free(samples);
 
             const r_in = params.r_in orelse lift(T, r_in_g, params);
+
+            // Self-irradiation: the kernel depends on (a, r_in) only, so it is
+            // built with the geometry slots and lifted onto T.
+            var profile: ?returning.Profile(T) = null;
+            defer if (profile) |pr| pr.deinit();
+            if (params.returning_radiation) {
+                const kernel_g = try returning.buildKernel(G, allocator, a_g, r_in_g, params.limb_darkening, opts.returning);
+                defer kernel_g.deinit();
+                const Lift = struct {
+                    p: Params(T),
+                    pub fn apply(self: @This(), q: G) T {
+                        return lift(T, q, self.p);
+                    }
+                };
+                const kernel = try kernel_g.convert(T, allocator, Lift{ .p = params });
+                defer kernel.deinit();
+                profile = try returning.solve(T, allocator, kernel, params.eta);
+            }
             const n0 = A.mult(params.norm, constants.normalisation(T, params.fcol, params.mass, params.distance));
             const mu = constants.temperatureScale(T, params.fcol, params.mdot, params.mass);
 
@@ -132,7 +152,7 @@ pub fn Spectrum(comptime T: type) type {
             for (samples) |smp| {
                 if (smp.weight.x == 0) continue;
                 const r = lift(T, smp.r, params);
-                const f = disc.fluxNoReturn(T, r, params.a, r_in, params.eta);
+                const f = if (profile) |pr| pr.flux(r) else disc.fluxNoReturn(T, r, params.a, r_in, params.eta);
                 if (!(f.x > 0)) continue;
                 const g = lift(T, smp.g, params);
                 const tau = A.mult(g, A.sqrt(A.sqrt(f)));
@@ -215,7 +235,7 @@ pub fn photonFlux(
     out: []T,
     opts: Options,
 ) Error!void {
-    const spec = try Spectrum(T).init(allocator, params, opts.image);
+    const spec = try Spectrum(T).init(allocator, params, opts);
     defer spec.deinit();
     spec.binned(edges, out, opts.n_energy);
 }
