@@ -5,7 +5,6 @@ version = "0.0.1"
 
 [deps]
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
-Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdc"
 SpectralFitting = "f2c56810-742e-4b72-8bf4-27af3bb81a12"
 
 [compat]

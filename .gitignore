@@ -9,3 +9,4 @@ validation/kerrbb_comparison*
 validation/kerrbb_reference.json
 validation/kerrbb_table.json
 zig-out/
+.DS_Store

@@ -68,7 +68,15 @@ above; the inclination derivative is per degree.
 
 - **Julia**: `julia/KerrzBB` provides `kerrzbb_flux` and `KerrzBBModel`, a
   SpectralFitting.jl additive model. ForwardDiff derivatives are assembled from
-  kerrzbb's Jacobian.
+  kerrzbb's Jacobian. SpectralFitting and its dependencies are in the
+  University of Bristol AstroRegistry, and KerrzBB itself is added by path:
+
+      julia> import Pkg
+      julia> Pkg.Registry.add(url = "https://github.com/astro-group-bristol/AstroRegistry")
+      julia> Pkg.develop(path = "/path/to/kerrzbb/julia/KerrzBB")
+      julia> using KerrzBB   # finds ../../zig-out/lib, or set ENV["KERRZBB_LIBRARY"]
+
+  Run its tests with `Pkg.test("KerrzBB")`.
 - **XSPEC**: `xspec/` holds a local model with the same parameters as kerrbb.
   The library is loaded at run time from `KERRZBB_LIBRARY`, and
   `KERRZBB_THREADS` sets the threads per evaluation:

@@ -28,9 +28,10 @@ end
     @test length(out) == 3 && all(>(0), out)
 
     f(a) = begin
-        m = SpectralFitting.remake_with_parameters(
-            model, (1.0, BASE.eta, a, BASE.incl, BASE.mass, BASE.mdot, BASE.distance, BASE.fcol),
-        )
+        # SpectralFitting rebuilds models from a homogeneous parameter vector,
+        # so all parameters share the dual type here too.
+        params = promote(1.0, BASE.eta, a, BASE.incl, BASE.mass, BASE.mdot, BASE.distance, BASE.fcol)
+        m = SpectralFitting.remake_with_parameters(model, params)
         y = zeros(typeof(a), 3, 1)
         SpectralFitting.invoke!(view(y, :, 1), EDGES, m)
         y[:, 1]

@@ -11,7 +11,8 @@ The shared library is found from `ENV["KERRZBB_LIBRARY"]`, falling back to
 """
 module KerrzBB
 
-using Libdl
+# Libdl via Base, so the package needs no stdlib dependency entry.
+import Base.Libc.Libdl
 import ForwardDiff
 import SpectralFitting
 using SpectralFitting: AbstractSpectralModel, Additive, FitParam
