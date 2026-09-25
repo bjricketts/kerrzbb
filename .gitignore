@@ -1,3 +1,7 @@
 zig-out/
 .zig-cache/
 papers/
+__pycache__/
+validation/kerrbb_comparison*
+validation/kerrbb_table.json
+validation/kerrbb_reference.json

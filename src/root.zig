@@ -8,6 +8,7 @@ pub const constants = @import("constants.zig");
 pub const disc = @import("disc.zig");
 pub const quadrature = @import("quadrature.zig");
 pub const image = @import("image.zig");
+pub const spectrum = @import("spectrum.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

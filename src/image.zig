@@ -232,12 +232,20 @@ fn trapezoidAngle(j: usize, n: usize) f64 {
 /// the image of the disc point (r, phi) is alpha = r cos phi,
 /// beta = r sin phi cos i (eq. C26), with lambda = -alpha sin i and
 /// Q = (r^2 - a^2) cos^2 i (eq. C27). Relative corrections are O(r_g / r).
-fn outerSamples(comptime T: type, s: Setup(T), out: []Sample(T), opts: Options) void {
+fn outerSamples(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    s: Setup(T),
+    out: []Sample(T),
+    opts: Options,
+) std.mem.Allocator.Error!void {
     const A = T.Algebra;
-    var x: [256]f64 = undefined;
-    var w: [256]f64 = undefined;
     const n_r = opts.n_outer;
-    quadrature.gaussLegendre(x[0..n_r], w[0..n_r]);
+    const x = try allocator.alloc(f64, n_r);
+    defer allocator.free(x);
+    const w = try allocator.alloc(f64, n_r);
+    defer allocator.free(w);
+    quadrature.gaussLegendre(x, w);
 
     const log_span = @log(opts.r_out / opts.r_break);
     const cos_i = A.cos(s.incl);
@@ -284,15 +292,16 @@ pub fn traceImage(
 ) Error![]Sample(T) {
     const A = T.Algebra;
     try checkParameters(a.x, incl.x);
-    std.debug.assert(opts.n_rho <= 256 and opts.n_outer <= 256);
 
     const s = Setup(T).init(a, incl, opts.observer_distance);
     const out = try allocator.alloc(Sample(T), sampleCount(opts));
     errdefer allocator.free(out);
 
-    var x: [256]f64 = undefined;
-    var w: [256]f64 = undefined;
-    quadrature.gaussLegendre(x[0..opts.n_rho], w[0..opts.n_rho]);
+    const x = try allocator.alloc(f64, opts.n_rho);
+    defer allocator.free(x);
+    const w = try allocator.alloc(f64, opts.n_rho);
+    defer allocator.free(w);
+    quadrature.gaussLegendre(x, w);
     const dtheta = 2.0 * std.math.pi / @as(f64, @floatFromInt(opts.n_theta));
 
     var k: usize = 0;
@@ -323,7 +332,7 @@ pub fn traceImage(
         }
     }
 
-    outerSamples(T, s, out[k..], opts);
+    try outerSamples(T, allocator, s, out[k..], opts);
     return out;
 }
 
@@ -378,7 +387,7 @@ pub fn tracePixels(
     const n_outer = base.n_theta * base.n_outer;
     const start = list.items.len;
     try list.resize(allocator, start + n_outer);
-    outerSamples(D0, s, list.items[start..], base);
+    try outerSamples(D0, allocator, s, list.items[start..], base);
     return list.toOwnedSlice(allocator);
 }
 
